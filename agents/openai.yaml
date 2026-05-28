@@ -1,0 +1,4 @@
+interface:
+  display_name: "Study Slide Tutor"
+  short_description: "Turn English lecture slides into Traditional Chinese tutoring."
+  default_prompt: "Use $study-slide-tutor to teach me this English lecture deck in Traditional Chinese, page by page."

@@ -21,7 +21,7 @@ Clone or copy this folder into your Codex skills directory.
 On Windows:
 
 ```powershell
-git clone https://github.com/<your-user>/study-slide-tutor.git C:\Users\USER\.codex\skills\study-slide-tutor
+git clone https://github.com/an4131754-collab/study-slide-tutor.git C:\Users\USER\.codex\skills\study-slide-tutor
 ```
 
 Or manually copy the `study-slide-tutor` folder to:

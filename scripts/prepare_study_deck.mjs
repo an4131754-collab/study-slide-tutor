@@ -21,6 +21,9 @@ function usage() {
     "  --scale <n>               PPTX render scale. Defaults to 1.",
     "  --python <path>           Python executable for PDF/PPTX text extraction.",
     "  --poppler-path <dir>      Directory containing Poppler binaries such as pdftoppm/pdfinfo.",
+    "  --markdown-mode <mode>    auto, never, or always. Defaults to auto.",
+    "  --markitdown-command <p>  Executable path/name for MarkItDown. Defaults to auto-detection.",
+    "  --markitdown-source <dir> Local microsoft/markitdown source checkout or packages/markitdown dir.",
     "  --node-modules <path>     node_modules directory containing @oai/artifact-tool.",
     "  --help                    Show this help.",
   ].join("\n");
@@ -67,6 +70,13 @@ function statPath(filePath) {
 
 function naturalCompare(a, b) {
   return new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare(a, b);
+}
+
+function commandExists(commandName) {
+  const finder = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(finder, [commandName], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return String(result.stdout).split(/\r?\n/).find(Boolean)?.trim() || "";
 }
 
 function userHome() {
@@ -118,6 +128,23 @@ function findPython(explicitPython) {
   return "";
 }
 
+function pythonCanUseMarkitdownApi(python) {
+  if (!python) return false;
+  const result = spawnSync(
+    python,
+    ["-c", "from markitdown import MarkItDown"],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      },
+    },
+  );
+  return result.status === 0;
+}
+
 function commandExistsInDir(directory, commandName) {
   if (!directory) return false;
   const names = process.platform === "win32"
@@ -149,6 +176,44 @@ function findPopplerPath(explicitPopplerPath) {
   if (result.status === 0) {
     const found = String(result.stdout).split(/\r?\n/).find(Boolean);
     if (found) return path.dirname(found.trim());
+  }
+
+  return "";
+}
+
+function resolveMarkitdownPackageDir(candidate) {
+  if (!candidate) return "";
+  const resolved = path.resolve(candidate);
+  const directPyproject = path.join(resolved, "pyproject.toml");
+  const directSrc = path.join(resolved, "src", "markitdown", "__init__.py");
+  if (fsSync.existsSync(directPyproject) && fsSync.existsSync(directSrc)) {
+    return resolved;
+  }
+
+  const packageDir = path.join(resolved, "packages", "markitdown");
+  const packagePyproject = path.join(packageDir, "pyproject.toml");
+  const packageSrc = path.join(packageDir, "src", "markitdown", "__init__.py");
+  if (fsSync.existsSync(packagePyproject) && fsSync.existsSync(packageSrc)) {
+    return packageDir;
+  }
+
+  return "";
+}
+
+function findLocalMarkitdownSource(explicitSource) {
+  const cwd = process.cwd();
+  const candidates = [
+    explicitSource,
+    process.env.MARKITDOWN_SOURCE,
+    path.join(cwd, "markitdown"),
+    path.join(cwd, "markitdown", "packages", "markitdown"),
+    path.join(cwd, "..", "markitdown"),
+    path.join(cwd, "..", "markitdown", "packages", "markitdown"),
+  ];
+
+  for (const candidate of candidates) {
+    const packageDir = resolveMarkitdownPackageDir(candidate);
+    if (packageDir) return packageDir;
   }
 
   return "";
@@ -224,6 +289,175 @@ async function saveBlobToFile(blob, filePath) {
     return;
   }
   throw new Error("Unsupported blob returned by artifact-tool export.");
+}
+
+function markitdownTimeoutMs() {
+  const raw = process.env.STUDY_SLIDE_TUTOR_MARKITDOWN_TIMEOUT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : 120000;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 120000;
+}
+
+function markitdownExtraForInput(inputPath) {
+  const extension = path.extname(inputPath).toLowerCase();
+  if (extension === ".pdf") return "pdf";
+  if (extension === ".pptx") return "pptx";
+  return "all";
+}
+
+function buildMarkitdownAttempts(inputPath, markdownPath, options) {
+  const attempts = [];
+  const python = findPython(options.python);
+  const extra = markitdownExtraForInput(inputPath);
+  if (options.command) {
+    attempts.push({
+      label: options.command,
+      command: options.command,
+      args: [inputPath, "-o", markdownPath],
+    });
+  }
+
+  const uv = commandExists("uv");
+  const localSource = findLocalMarkitdownSource(options.source);
+  if (uv && localSource) {
+    const pythonArgs = python ? ["--python", python, "--no-python-downloads"] : [];
+    attempts.push({
+      label: `uv run local MarkItDown source (${extra} extra)`,
+      command: uv,
+      args: [
+        "run",
+        "--project",
+        localSource,
+        ...pythonArgs,
+        "--extra",
+        extra,
+        "markitdown",
+        inputPath,
+        "-o",
+        markdownPath,
+      ],
+      env: {
+        MARKITDOWN_SOURCE: localSource,
+      },
+    });
+  }
+
+  const markitdown = commandExists("markitdown");
+  if (markitdown) {
+    attempts.push({
+      label: "markitdown",
+      command: markitdown,
+      args: [inputPath, "-o", markdownPath],
+    });
+  }
+
+  if (pythonCanUseMarkitdownApi(python)) {
+    const apiScript = [
+      "import sys",
+      "from markitdown import MarkItDown",
+      "result = MarkItDown(enable_plugins=False).convert(sys.argv[1])",
+      "text = getattr(result, 'text_content', None) or getattr(result, 'markdown', None) or str(result)",
+      "open(sys.argv[2], 'w', encoding='utf-8').write(text)",
+    ].join("; ");
+    attempts.push({
+      label: "python MarkItDown API",
+      command: python,
+      args: ["-c", apiScript, inputPath, markdownPath],
+    });
+  }
+
+  const uvx = commandExists("uvx");
+  if (uvx) {
+    attempts.push({
+      label: `uvx --from markitdown[${extra}] markitdown`,
+      command: uvx,
+      args: ["--from", `markitdown[${extra}]`, "markitdown", inputPath, "-o", markdownPath],
+    });
+  }
+
+  return attempts;
+}
+
+async function prepareMarkdown(inputPath, outDir, sourceStat, options) {
+  const mode = options.mode;
+  const markdownPath = path.join(outDir, "document.md");
+  if (mode === "never") {
+    return {
+      markdownPath: "",
+      markdownStatus: "disabled",
+      markdownCommand: "",
+      markdownWarnings: [],
+    };
+  }
+  if (!sourceStat?.isFile()) {
+    return {
+      markdownPath: "",
+      markdownStatus: "skipped-non-file-input",
+      markdownCommand: "",
+      markdownWarnings: ["MarkItDown conversion is skipped for directory inputs."],
+    };
+  }
+  if (IMAGE_EXTENSIONS.has(path.extname(inputPath).toLowerCase())) {
+    return {
+      markdownPath: "",
+      markdownStatus: "skipped-image-input",
+      markdownCommand: "",
+      markdownWarnings: ["MarkItDown conversion is skipped for image inputs; use imagePath directly for visual tutoring."],
+    };
+  }
+
+  const attempts = buildMarkitdownAttempts(inputPath, markdownPath, options);
+  const extra = markitdownExtraForInput(inputPath);
+  const warnings = [];
+  if (attempts.length === 0) {
+    return {
+      markdownPath: "",
+      markdownStatus: mode === "always" ? "failed" : "unavailable",
+      markdownCommand: "",
+      markdownWarnings: [
+        `MarkItDown is unavailable. Install it with \`pip install "markitdown[${extra}]"\` or use \`uvx --from markitdown[${extra}] markitdown\`.`,
+      ],
+    };
+  }
+
+  await fs.mkdir(outDir, { recursive: true });
+  for (const attempt of attempts) {
+    const result = spawnSync(attempt.command, attempt.args, {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...(attempt.env || {}),
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+        UV_CACHE_DIR: process.env.UV_CACHE_DIR || path.join(outDir, ".uv-cache"),
+        UV_PYTHON_INSTALL_DIR: process.env.UV_PYTHON_INSTALL_DIR || path.join(outDir, ".uv-python"),
+        UV_TOOL_DIR: process.env.UV_TOOL_DIR || path.join(outDir, ".uv-tools"),
+      },
+      timeout: markitdownTimeoutMs(),
+      maxBuffer: 100 * 1024 * 1024,
+    });
+    const exists = fsSync.existsSync(markdownPath);
+    const size = exists ? fsSync.statSync(markdownPath).size : 0;
+    if (result.status === 0 && exists && size > 0) {
+      return {
+        markdownPath: path.resolve(markdownPath),
+        markdownStatus: "ready",
+        markdownCommand: attempt.label,
+        markdownBytes: size,
+        markdownWarnings: warnings,
+      };
+    }
+    const stderr = (result.stderr || "").trim();
+    const stdout = (result.stdout || "").trim();
+    const message = result.error?.message || stderr || stdout || `exit status ${result.status ?? "unknown"}`;
+    warnings.push(`MarkItDown attempt failed (${attempt.label}): ${message}`);
+  }
+
+  return {
+    markdownPath: "",
+    markdownStatus: "failed",
+    markdownCommand: "",
+    markdownWarnings: warnings,
+  };
 }
 
 async function prepareImages(inputPath, outDir, baseManifest) {
@@ -488,6 +722,7 @@ async function main() {
   const outDir = path.resolve(requireArg(args, "out-dir"));
   const batchSize = args["batch-size"] ? Number.parseInt(args["batch-size"], 10) : 1;
   const renderPdf = args["render-pdf"] || "auto";
+  const markdownMode = args["markdown-mode"] || "auto";
   const dpi = args.dpi ? Number.parseInt(args.dpi, 10) : 160;
   const scale = args.scale ? Number.parseFloat(args.scale) : 1;
 
@@ -496,6 +731,9 @@ async function main() {
   }
   if (!["auto", "never", "always"].includes(renderPdf)) {
     throw new Error("--render-pdf must be auto, never, or always");
+  }
+  if (!["auto", "never", "always"].includes(markdownMode)) {
+    throw new Error("--markdown-mode must be auto, never, or always");
   }
   if (!Number.isInteger(dpi) || dpi <= 0) {
     throw new Error("--dpi must be a positive integer");
@@ -543,17 +781,35 @@ async function main() {
     throw new Error(`Unsupported input type: ${extension || "directory without images"}`);
   }
 
+  const markdown = await prepareMarkdown(inputPath, outDir, sourceStat, {
+    command: args["markitdown-command"],
+    mode: markdownMode,
+    python: args.python,
+    source: args["markitdown-source"],
+  });
+  manifest.markdownPath = markdown.markdownPath;
+  manifest.markdownStatus = markdown.markdownStatus;
+  manifest.markdownCommand = markdown.markdownCommand;
+  manifest.markdownBytes = markdown.markdownBytes || 0;
+  manifest.markdownWarnings = markdown.markdownWarnings;
+  if (markdownMode === "always" && markdown.markdownStatus === "failed") {
+    manifest.status = "markdown-failed";
+  }
+
   const manifestPath = path.join(outDir, "manifest.json");
   manifest.manifestPath = path.resolve(manifestPath);
   manifest.nextStep =
-    "Teach exactly one page per response by default. Skim the full manifest for context, inspect imagePath when present, and use extractedText as support rather than the only source of truth.";
+    "Teach exactly one page per response by default. If markdownPath is ready, read document.md first for document structure and token-efficient text. Inspect imagePath when present, and use extractedText as support rather than the only source of truth.";
   await writeJson(manifestPath, manifest);
 
   console.log(JSON.stringify({
     manifestPath: manifest.manifestPath,
     inputType: manifest.inputType,
     pageCount: manifest.pageCount,
+    markdownStatus: manifest.markdownStatus,
+    markdownPath: manifest.markdownPath || undefined,
     warnings: manifest.warnings,
+    markdownWarnings: manifest.markdownWarnings,
   }, null, 2));
 }
 

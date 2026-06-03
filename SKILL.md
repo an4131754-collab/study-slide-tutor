@@ -15,7 +15,13 @@ Use the bundled script first when the user provides a PDF, PPTX, or image folder
 node <skill-dir>/scripts/prepare_study_deck.mjs --input <file-or-folder> --out-dir <workspace-output-dir>
 ```
 
-The script writes `manifest.json` with page numbers, slide/page images when available, extracted text when available, and warnings for degraded extraction or rendering.
+If the user has a local Microsoft MarkItDown source checkout, pass it explicitly:
+
+```bash
+node <skill-dir>/scripts/prepare_study_deck.mjs --input <file-or-folder> --out-dir <workspace-output-dir> --markitdown-source <path-to-markitdown-repo>
+```
+
+The script writes `manifest.json` with page numbers, slide/page images when available, extracted text when available, a MarkItDown-generated Markdown file when available, and warnings for degraded extraction or rendering.
 
 ## Workflow
 
@@ -25,10 +31,29 @@ The script writes `manifest.json` with page numbers, slide/page images when avai
    - Image folder: sort images naturally by filename and treat each image as one slide page.
    - Single image: treat it as page 1.
 2. Read `manifest.json` before teaching.
-3. Skim all page records in the manifest once to understand the deck flow, titles, repeated pages, and upcoming context.
-4. Teach only one page per response by default, even if the manifest contains many pages.
-5. When the user asks to continue or go to the next page in English or Traditional Chinese, continue with exactly the next page.
-6. Do not create a Markdown notes file unless the user asks. Default output is chat.
+3. If `markdownPath` is present and `markdownStatus` is `ready`, read the generated `document.md` first to understand document structure, headings, lists, and tables with fewer tokens.
+4. Skim all page records in the manifest once to understand the deck flow, titles, repeated pages, and upcoming context.
+5. Teach only one page per response by default, even if the manifest contains many pages.
+6. When the user asks to continue or go to the next page in English or Traditional Chinese, continue with exactly the next page.
+7. Do not create user-facing notes unless the user asks. The generated `document.md` is a processing artifact, not the final tutoring output.
+
+## Markdown-First Reading
+
+MarkItDown is used as a text-structure helper when available.
+
+- Prefer `document.md` for the document's readable text, headings, lists, and tables.
+- Use rendered page images from `imagePath` to verify diagrams, equations, arrows, layout, and any content that Markdown conversion may lose.
+- Use per-page `extractedText` as a backup or page-local reference.
+- For PDF inputs, the preparation script uses the MarkItDown `pdf` extra when running from a local source checkout. For PPTX inputs, it uses the `pptx` extra. It does not force `markitdown[all]` unless the input type is unknown to the Markdown helper.
+- For image inputs, skip MarkItDown and use the image itself as the source of truth.
+- If `markdownStatus` is `unavailable` or `failed`, continue with images and extracted text.
+- Do not paste large sections of `document.md` back to the user. Summarize and teach one page at a time.
+
+Use this source priority while teaching:
+
+1. `document.md`: fast text structure for headings, bullets, tables, and repeated sections.
+2. Page image from `imagePath`: visual truth for diagrams, formulas, arrows, layout, and unreadable or missing Markdown text.
+3. `extractedText`: page-local anchor and fallback when Markdown or image inspection is incomplete.
 
 ## Output Style
 
@@ -107,6 +132,7 @@ When using a manifest, keep track of:
 - total pages
 - current page
 - next page
+- markdown path and markdown status
 - whether each page has `imagePath`, extracted text, or warnings
 
 At the end of every page, include one short Traditional Chinese continuation sentence saying:
@@ -126,3 +152,9 @@ If PDF rendering fails:
 - Continue with extracted text when enough information exists.
 - If visuals, charts, equations, or layout are important and no slide images are available, ask the user to provide a PDF export or screenshots for the affected pages.
 - Never claim that a page has no content merely because extraction failed.
+
+If MarkItDown conversion fails:
+
+- Continue with the rest of the manifest.
+- Mention only if Markdown would materially improve the current task.
+- Do not ask the user to install MarkItDown unless repeated PDF/PPTX reading is expected or the current extracted text is poor.

@@ -7,7 +7,9 @@ Study Slide Tutor 是一個 Codex skill，用來把英文課堂簡報變成繁�
 ## 功能
 
 - 支援 PDF、PPTX、單張圖片、圖片資料夾。
-- 會先整理出穩定的 `manifest.json`，包含頁碼、抽取文字、可用的頁面圖片與處理警告。
+- 會先整理出穩定的輕量 `manifest.json`，包含頁碼、文字檔路徑、圖片路徑與處理警告。
+- PDF 每頁文字會存到 `page-text/page-0001.txt`，不會塞進 manifest 裡。
+- PDF 預設按需產生頁面圖片，不會一開始把整份 PDF 全部轉成 PNG。
 - 如果本機可用 MarkItDown，會額外把文件轉成 `document.md`，讓 AI 更容易讀取標題、列表、表格與文字結構。
 - 預設一次只教一頁，避免輸出太密集。
 - 每頁先完整翻譯，再用白話講解。
@@ -49,7 +51,7 @@ skill 會先準備整份簡報，然後從第 1 頁開始教。你說「下一�
 
 這個 skill 可以直接從很多 PDF 抽取文字，不一定需要額外安裝工具。
 
-但如果投影片有圖表、公式、流程圖、版面配置，將 PDF 每頁轉成圖片會更可靠。Windows 建議用 Scoop 安裝 Poppler：
+但如果投影片有圖表、公式、流程圖、版面配置，將 PDF 當前頁轉成圖片會更可靠。Windows 建議用 Scoop 安裝 Poppler：
 
 ```powershell
 scoop install poppler
@@ -68,6 +70,32 @@ pdftoppm -h
 ```
 
 如果有顯示說明文字，就代表 Poppler 可以被找到。
+
+預設準備 PDF 時不會全頁轉圖：
+
+```powershell
+node C:\Users\USER\.codex\skills\study-slide-tutor\scripts\prepare_study_deck.mjs `
+  --input path-to-file.pdf `
+  --out-dir path-to-output-folder
+```
+
+教第 N 頁前，按需產生第 N 頁到第 N+5 頁圖片：
+
+```powershell
+node C:\Users\USER\.codex\skills\study-slide-tutor\scripts\prepare_study_deck.mjs `
+  --manifest path-to-output-folder\manifest.json `
+  --ensure-page 12 `
+  --prefetch-pages 5
+```
+
+如果你真的想一次產生全部頁面圖片，仍可手動指定：
+
+```powershell
+node C:\Users\USER\.codex\skills\study-slide-tutor\scripts\prepare_study_deck.mjs `
+  --input path-to-file.pdf `
+  --out-dir path-to-output-folder `
+  --render-pdf always
+```
 
 ## Markdown 轉換與 MarkItDown
 
@@ -109,9 +137,10 @@ MarkItDown 不是必須安裝。沒有 MarkItDown 時，skill 仍會用 PDF 文�
 
 實際教學時，最適合 AI 的格式是混合使用：
 
-- `document.md`：讀標題、段落、列表、表格，省 token。
-- `pages/page-xxx.png`：看方塊圖、公式、箭頭、版面與圖片內容。
-- `manifest.json` 裡的 `extractedText`：當作每頁定位與備援文字。
+- `manifest.json`：只當索引，記錄頁碼、路徑、狀態與大小。
+- `page-text/page-0001.txt`：教某一頁時才讀該頁文字，並預設讀前 2 頁文字補上下文。
+- `pages/page-0001.png`：看方塊圖、公式、箭頭、版面與圖片內容，預設按需產生。
+- `document.md`：讀標題、段落、列表、表格，用來理解整份文件結構。
 
 ## 內含檔案
 
@@ -130,7 +159,8 @@ study-slide-tutor/
 
 - 預設輸出在聊天中，不會另外產生 Markdown 筆記檔。
 - 預設一次只教一頁。
-- skill 會先讀完整 manifest 理解整份講義脈絡，但不會一次把多頁全部講完，除非你明確要求。
-- 如果 `document.md` 產生成功，skill 會先讀 Markdown 理解文字結構，再看頁面圖片確認圖表、公式與版面。
+- skill 會先讀 manifest 索引理解頁面狀態，但不會一次讀完整講義文字。
+- 教第 N 頁時，skill 會讀第 N 頁與前 2 頁的 `page-text`，避免上下文斷掉。
+- 如果 `document.md` 產生成功，skill 會用 Markdown 理解文字結構，再看當頁圖片確認圖表、公式與版面。
 - 如果圖片文字看不清楚，skill 應該直接說看不清楚，不會自行猜測。
-- 如果 PDF 無法渲染成圖片，仍可先用抽取文字教學，但含圖表或公式的頁面可能需要補充截圖或安裝 Poppler。
+- 如果 PDF 無法渲染成圖片，仍可先用 `page-text` 教學，但含圖表或公式的頁面可能需要補充截圖或安裝 Poppler。

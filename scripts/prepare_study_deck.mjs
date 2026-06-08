@@ -8,15 +8,19 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"]);
+const DEFAULT_PREFETCH_PAGES = 5;
+const DEFAULT_CONTEXT_BEFORE_PAGES = 2;
+const PAGE_NUMBER_WIDTH = 4;
 
 function usage() {
   return [
     "Usage:",
     "  node prepare_study_deck.mjs --input <file-or-folder> --out-dir <dir> [options]",
+    "  node prepare_study_deck.mjs --manifest <manifest.json> --ensure-page <n> [options]",
     "",
     "Options:",
     "  --batch-size <n>          Suggested teaching batch size. Defaults to 1.",
-    "  --render-pdf <mode>       auto, never, or always. Defaults to auto.",
+    "  --render-pdf <mode>       auto, never, or always. Defaults to auto. PDF auto is lazy render.",
     "  --dpi <n>                 PDF render DPI when rendering is available. Defaults to 160.",
     "  --scale <n>               PPTX render scale. Defaults to 1.",
     "  --python <path>           Python executable for PDF/PPTX text extraction.",
@@ -24,6 +28,10 @@ function usage() {
     "  --markdown-mode <mode>    auto, never, or always. Defaults to auto.",
     "  --markitdown-command <p>  Executable path/name for MarkItDown. Defaults to auto-detection.",
     "  --markitdown-source <dir> Local microsoft/markitdown source checkout or packages/markitdown dir.",
+    "  --manifest <path>         Existing manifest.json for lazy PDF page rendering.",
+    "  --ensure-page <n>         Ensure this PDF page image exists; renders through n + prefetch.",
+    `  --prefetch-pages <n>      Pages to render after --ensure-page. Defaults to ${DEFAULT_PREFETCH_PAGES}.`,
+    `  --context-before-pages <n> Page-text files to read before the current page. Defaults to ${DEFAULT_CONTEXT_BEFORE_PAGES}.`,
     "  --node-modules <path>     node_modules directory containing @oai/artifact-tool.",
     "  --help                    Show this help.",
   ].join("\n");
@@ -70,6 +78,30 @@ function statPath(filePath) {
 
 function naturalCompare(a, b) {
   return new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare(a, b);
+}
+
+function fileSize(filePath) {
+  try {
+    return fsSync.statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
+function parsePositiveInteger(value, name) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value, name) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`--${name} must be a non-negative integer`);
+  }
+  return parsed;
 }
 
 function commandExists(commandName) {
@@ -498,8 +530,89 @@ async function prepareImages(inputPath, outDir, baseManifest) {
   };
 }
 
-async function preparePdf(inputPath, outDir, baseManifest, options) {
+function applyRenderedPages(manifest, renderedPages) {
+  const byPage = new Map((renderedPages || []).map((page) => [page.pageNumber, page]));
+  for (const page of manifest.pages || []) {
+    const rendered = byPage.get(page.pageNumber);
+    if (!rendered) continue;
+    page.imagePath = rendered.imagePath;
+    page.imageStatus = "rendered";
+    if (page.status === "text-ready" || page.status === "text-extracted") {
+      page.status = "text-and-image-ready";
+    } else if (page.status === "text-extract-failed") {
+      page.status = "image-ready";
+    } else if (!page.status || page.status === "rendered") {
+      page.status = "image-ready";
+    }
+  }
+}
+
+function renderPdfPageRange(inputPath, outDir, options) {
+  const python = findPython(options.python);
+  const popplerPath = findPopplerPath(options.popplerPath);
   const pagesDir = path.join(outDir, "pages");
+  const script = String.raw`
+import json
+import os
+import sys
+
+pdf_path, pages_dir, first_raw, last_raw, dpi_raw, poppler_path, width_raw = sys.argv[1:8]
+first_page = int(first_raw)
+last_page = int(last_raw)
+dpi = int(dpi_raw)
+width = int(width_raw)
+result = {"ok": True, "pages": [], "warnings": [], "popplerPath": poppler_path or ""}
+
+try:
+    from pdf2image import convert_from_path
+    os.makedirs(pages_dir, exist_ok=True)
+    kwargs = {"dpi": dpi, "first_page": first_page, "last_page": last_page}
+    if poppler_path:
+        kwargs["poppler_path"] = poppler_path
+    images = convert_from_path(pdf_path, **kwargs)
+    for offset, image in enumerate(images):
+        page_number = first_page + offset
+        image_path = os.path.abspath(os.path.join(pages_dir, f"page-{page_number:0{width}d}.png"))
+        image.save(image_path, "PNG")
+        result["pages"].append({
+            "pageNumber": page_number,
+            "imagePath": image_path,
+            "imageBytes": os.path.getsize(image_path),
+        })
+except Exception as exc:
+    result["ok"] = False
+    result["warnings"].append("PDF page rendering failed: " + str(exc))
+
+print(json.dumps(result, ensure_ascii=True))
+`;
+
+  const rendered = runPythonJson(python, script, [
+    inputPath,
+    pagesDir,
+    String(options.firstPage),
+    String(options.lastPage),
+    String(options.dpi),
+    popplerPath,
+    String(PAGE_NUMBER_WIDTH),
+  ]);
+  if (!rendered.ok) {
+    return {
+      ok: false,
+      pages: [],
+      warnings: [rendered.error],
+      popplerPath,
+    };
+  }
+  return {
+    ok: Boolean(rendered.value.ok),
+    pages: rendered.value.pages || [],
+    warnings: rendered.value.warnings || [],
+    popplerPath: rendered.value.popplerPath || popplerPath || "",
+  };
+}
+
+async function preparePdf(inputPath, outDir, baseManifest, options) {
+  const textDir = path.join(outDir, "page-text");
   const python = findPython(options.python);
   const popplerPath = findPopplerPath(options.popplerPath);
   const renderMode = options.renderPdf;
@@ -509,28 +622,38 @@ import json
 import os
 import sys
 
-pdf_path, pages_dir, render_mode, dpi_raw, poppler_path = sys.argv[1:6]
-dpi = int(dpi_raw)
-result = {"pageCount": 0, "pages": [], "warnings": [], "popplerPath": poppler_path or ""}
+pdf_path, text_dir, render_mode, width_raw = sys.argv[1:5]
+width = int(width_raw)
+result = {"pageCount": 0, "pages": [], "warnings": []}
 
 try:
     from pypdf import PdfReader
     reader = PdfReader(pdf_path)
     result["pageCount"] = len(reader.pages)
+    os.makedirs(text_dir, exist_ok=True)
     for index, page in enumerate(reader.pages):
+        page_number = index + 1
+        text_path = os.path.abspath(os.path.join(text_dir, f"page-{page_number:0{width}d}.txt"))
         warning = None
         try:
             text = page.extract_text() or ""
-            status = "text-extracted"
+            status = "text-ready"
+            text_status = "ready"
         except Exception as exc:
             text = ""
             status = "text-extract-failed"
+            text_status = "failed"
             warning = str(exc)
+        with open(text_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
         item = {
-            "pageNumber": index + 1,
+            "pageNumber": page_number,
             "sourceName": os.path.basename(pdf_path),
+            "textPath": text_path,
+            "textBytes": os.path.getsize(text_path),
+            "textStatus": text_status,
             "imagePath": "",
-            "extractedText": text,
+            "imageStatus": "render-disabled" if render_mode == "never" else "not-rendered",
             "status": status,
             "warnings": [],
         }
@@ -540,51 +663,10 @@ try:
 except Exception as exc:
     result["warnings"].append("PDF text extraction failed: " + str(exc))
 
-if render_mode != "never":
-    try:
-        from pdf2image import convert_from_path
-        os.makedirs(pages_dir, exist_ok=True)
-        kwargs = {"dpi": dpi}
-        if poppler_path:
-            kwargs["poppler_path"] = poppler_path
-        images = convert_from_path(pdf_path, **kwargs)
-        if not result["pages"]:
-            result["pageCount"] = len(images)
-            result["pages"] = [
-                {
-                    "pageNumber": index + 1,
-                    "sourceName": os.path.basename(pdf_path),
-                    "imagePath": "",
-                    "extractedText": "",
-                    "status": "rendered",
-                    "warnings": [],
-                }
-                for index in range(len(images))
-            ]
-        for index, image in enumerate(images):
-            image_path = os.path.abspath(os.path.join(pages_dir, f"page-{index + 1:03d}.png"))
-            image.save(image_path, "PNG")
-            if index < len(result["pages"]):
-                result["pages"][index]["imagePath"] = image_path
-                if result["pages"][index]["status"] == "text-extracted":
-                    result["pages"][index]["status"] = "text-and-image-ready"
-                elif result["pages"][index]["status"] == "text-extract-failed":
-                    result["pages"][index]["status"] = "image-ready"
-                else:
-                    result["pages"][index]["status"] = "rendered"
-    except Exception as exc:
-        if poppler_path:
-            message = "PDF rendering failed with Poppler path " + poppler_path + ": " + str(exc)
-        else:
-            message = "PDF rendering failed: " + str(exc)
-        result["warnings"].append(message)
-        if render_mode == "always":
-            result["renderError"] = message
-
 print(json.dumps(result, ensure_ascii=True))
 `;
 
-  const extracted = runPythonJson(python, script, [inputPath, pagesDir, renderMode, String(dpi), popplerPath]);
+  const extracted = runPythonJson(python, script, [inputPath, textDir, renderMode, String(PAGE_NUMBER_WIDTH)]);
   if (!extracted.ok) {
     return {
       ...baseManifest,
@@ -603,10 +685,23 @@ print(json.dumps(result, ensure_ascii=True))
     pages: extracted.value.pages,
     outputDir: outDir,
     warnings: extracted.value.warnings || [],
-    popplerPath: extracted.value.popplerPath || popplerPath || "",
+    popplerPath,
+    pdfRenderDpi: dpi,
   };
-  if (renderMode === "always" && extracted.value.renderError) {
-    manifest.status = "render-failed";
+  if (renderMode === "always" && manifest.pageCount > 0) {
+    const rendered = renderPdfPageRange(inputPath, outDir, {
+      firstPage: 1,
+      lastPage: manifest.pageCount,
+      dpi,
+      popplerPath,
+      python: options.python,
+    });
+    applyRenderedPages(manifest, rendered.pages);
+    manifest.popplerPath = rendered.popplerPath || manifest.popplerPath;
+    if (!rendered.ok) {
+      manifest.status = "render-failed";
+      manifest.warnings.push(...rendered.warnings);
+    }
   }
   return manifest;
 }
@@ -711,6 +806,70 @@ async function preparePptx(inputPath, outDir, baseManifest, options) {
   };
 }
 
+async function ensurePdfPages(manifestPath, options) {
+  const resolvedManifestPath = path.resolve(manifestPath);
+  const manifest = JSON.parse(await fs.readFile(resolvedManifestPath, "utf8"));
+  if (manifest.inputType !== "pdf") {
+    throw new Error("--ensure-page is only supported for PDF manifests.");
+  }
+
+  const pageCount = Number.parseInt(manifest.pageCount, 10);
+  const ensurePage = options.ensurePage;
+  if (!Number.isInteger(pageCount) || pageCount <= 0) {
+    throw new Error("Manifest has no valid PDF pageCount.");
+  }
+  if (ensurePage > pageCount) {
+    throw new Error(`--ensure-page ${ensurePage} is greater than pageCount ${pageCount}.`);
+  }
+
+  const outputDir = manifest.outputDir || path.dirname(resolvedManifestPath);
+  const firstPage = ensurePage;
+  const lastPage = Math.min(pageCount, ensurePage + options.prefetchPages);
+  const contextFirstPage = Math.max(1, ensurePage - options.contextBeforePages);
+  const dpi = options.dpi || manifest.pdfRenderDpi || 160;
+  const rendered = renderPdfPageRange(manifest.inputPath, outputDir, {
+    firstPage,
+    lastPage,
+    dpi,
+    popplerPath: options.popplerPath || manifest.popplerPath,
+    python: options.python,
+  });
+
+  applyRenderedPages(manifest, rendered.pages);
+  manifest.popplerPath = rendered.popplerPath || manifest.popplerPath || "";
+  manifest.pdfRenderDpi = dpi;
+  manifest.updatedAt = new Date().toISOString();
+  manifest.lastEnsuredPage = ensurePage;
+  manifest.lastPrefetchedThroughPage = lastPage;
+  manifest.renderWarnings = rendered.warnings || [];
+  if (!rendered.ok) {
+    manifest.status = "render-failed";
+  } else if (manifest.status === "render-failed") {
+    manifest.status = "prepared";
+  }
+
+  await writeJson(resolvedManifestPath, manifest);
+  const contextPages = (manifest.pages || [])
+    .filter((page) => page.pageNumber >= contextFirstPage && page.pageNumber <= ensurePage)
+    .map((page) => ({
+      pageNumber: page.pageNumber,
+      textPath: page.textPath || "",
+      textBytes: page.textBytes || fileSize(page.textPath || ""),
+      textStatus: page.textStatus || "",
+    }));
+  return {
+    manifestPath: resolvedManifestPath,
+    inputType: manifest.inputType,
+    pageCount: manifest.pageCount,
+    ensuredPage: ensurePage,
+    prefetchedThroughPage: lastPage,
+    contextFromPage: contextFirstPage,
+    contextTextPages: contextPages,
+    renderedPages: rendered.pages.map((page) => page.pageNumber),
+    warnings: rendered.warnings || [],
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -718,17 +877,36 @@ async function main() {
     return;
   }
 
+  const prefetchPages = args["prefetch-pages"] !== undefined
+    ? parseNonNegativeInteger(args["prefetch-pages"], "prefetch-pages")
+    : DEFAULT_PREFETCH_PAGES;
+  const contextBeforePages = args["context-before-pages"] !== undefined
+    ? parseNonNegativeInteger(args["context-before-pages"], "context-before-pages")
+    : DEFAULT_CONTEXT_BEFORE_PAGES;
+  const requestedDpi = args.dpi ? parsePositiveInteger(args.dpi, "dpi") : undefined;
+
+  if (args.manifest) {
+    const ensurePage = parsePositiveInteger(requireArg(args, "ensure-page"), "ensure-page");
+    const result = await ensurePdfPages(args.manifest, {
+      ensurePage,
+      prefetchPages,
+      contextBeforePages,
+      dpi: requestedDpi,
+      popplerPath: args["poppler-path"],
+      python: args.python,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   const inputPath = path.resolve(requireArg(args, "input"));
   const outDir = path.resolve(requireArg(args, "out-dir"));
-  const batchSize = args["batch-size"] ? Number.parseInt(args["batch-size"], 10) : 1;
+  const batchSize = args["batch-size"] ? parsePositiveInteger(args["batch-size"], "batch-size") : 1;
   const renderPdf = args["render-pdf"] || "auto";
   const markdownMode = args["markdown-mode"] || "auto";
-  const dpi = args.dpi ? Number.parseInt(args.dpi, 10) : 160;
+  const dpi = requestedDpi || 160;
   const scale = args.scale ? Number.parseFloat(args.scale) : 1;
 
-  if (!Number.isInteger(batchSize) || batchSize <= 0) {
-    throw new Error("--batch-size must be a positive integer");
-  }
   if (!["auto", "never", "always"].includes(renderPdf)) {
     throw new Error("--render-pdf must be auto, never, or always");
   }
@@ -751,11 +929,13 @@ async function main() {
 
   const extension = sourceStat.isFile() ? path.extname(inputPath).toLowerCase() : "";
   const baseManifest = {
-    version: 1,
+    version: 2,
     createdAt: new Date().toISOString(),
     inputPath,
     inputName: path.basename(inputPath),
     suggestedBatchSize: batchSize,
+    suggestedPrefetchPages: prefetchPages,
+    suggestedContextBeforePages: contextBeforePages,
     status: "prepared",
     warnings: [],
     pages: [],
@@ -799,7 +979,7 @@ async function main() {
   const manifestPath = path.join(outDir, "manifest.json");
   manifest.manifestPath = path.resolve(manifestPath);
   manifest.nextStep =
-    "Teach exactly one page per response by default. If markdownPath is ready, read document.md first for document structure and token-efficient text. Inspect imagePath when present, and use extractedText as support rather than the only source of truth.";
+    "Teach exactly one page per response by default. For PDF manifests, read the current page textPath plus the previous suggestedContextBeforePages page-text files for context, ensure the current page image with --manifest and --ensure-page, and use document.md only for structure or nearby context.";
   await writeJson(manifestPath, manifest);
 
   console.log(JSON.stringify({

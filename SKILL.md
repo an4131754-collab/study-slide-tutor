@@ -1,6 +1,6 @@
 ---
 name: study-slide-tutor
-description: "Teach English lecture slides, classroom decks, PDFs, PPTX files, screenshots, or folders of slide images in Traditional Chinese. Use when the user wants an AI teaching assistant for English course materials, not just translation: page-by-page translation, plain-language explanation, retained English terminology, exam points, confusion traps, and step-by-step formula, algorithm, networking, data structure, physics, or math walkthroughs."
+description: "Teach English lecture slides, classroom decks, PDFs, PPTX files, screenshots, or folders of slide images in Traditional Chinese. Use when the user wants an AI teaching assistant for English course materials, not just translation: page-by-page English/Traditional Chinese line-by-line comparison, plain-language explanation, retained English terminology, exam points, confusion traps, and step-by-step formula, algorithm, networking, data structure, physics, or math walkthroughs."
 ---
 
 # Study Slide Tutor
@@ -84,37 +84,58 @@ For a substantive page, use this structure. Section headings and all explanation
 ```markdown
 ## Page N heading in Traditional Chinese
 
-### Full translation heading in Traditional Chinese
+### 中英文對照
 
-Translate the visible English into natural Traditional Chinese. Preserve important English terms in parentheses or inline.
+| English original | 繁體中文 |
+| --- | --- |
+| Visible English title, bullet, or short sentence from the current page. | Natural Traditional Chinese translation, preserving important English terms inline. |
 
-### Plain-language explanation heading in Traditional Chinese
+### 白話講解
 
 Explain what the slide is really saying as if the user asked what this page is doing.
 
-### Core points heading in Traditional Chinese
+### 核心重點
 
 - ...
 
-### Important English terms heading in Traditional Chinese
+### 重要英文名詞
 
 - English term: Traditional Chinese explanation
 
-### Possible exam points heading in Traditional Chinese
+### 可能考點
 
 - ...
 
-### Easy-to-confuse points heading in Traditional Chinese
+### 容易混淆
 
 - ...
 ```
 
 Add a Traditional Chinese section for formula, algorithm, or process walkthrough only when the page contains formulas, algorithms, procedures, network flows, data structures, physics, or math. Do not skip steps. Use concrete numbers when possible.
 
+The `中英文對照` section replaces a standalone full Chinese translation. Do not output both a bilingual comparison and a separate full translation unless the user explicitly asks.
+
+Build bilingual comparisons from the current page only. Use the previous 2 page-text files only for context and explanation, not as rows in the current page's bilingual table.
+
+Split bilingual rows by the slide's logical units: title, bullet, diagram label, formula line, pseudocode line, or short sentence. Do not split word by word.
+
+When a Markdown table would be hard to read, especially for formulas, pseudocode, code, or long process lines, use this item format instead:
+
+```markdown
+- English: set timer to interrupt periodically with period T
+  中文：設定 timer，讓它每隔 T 週期固定中斷一次
+```
+
 For low-information pages, use a much shorter response:
 
 ```markdown
 ## Page N heading in Traditional Chinese
+
+### 中英文對照
+
+| English original | 繁體中文 |
+| --- | --- |
+| Main visible title or phrase. | Natural Traditional Chinese translation. |
 
 One short Traditional Chinese sentence saying the page has little substantive content, followed by the summary.
 ```
@@ -122,6 +143,7 @@ One short Traditional Chinese sentence saying the page has little substantive co
 ## Teaching Rules
 
 - Keep important technical terms in English, especially terms likely to appear in homework, exams, APIs, code, or diagrams.
+- In the `中英文對照` section, preserve the visible English original as faithfully as possible. Translate naturally into Traditional Chinese while keeping important English terms such as `deadline`, `sampling period`, and `PID controller`.
 - Do not assume the user already knows prerequisite background.
 - When a concept is abstract, add a daily-life analogy or a small numeric example.
 - When explaining formulas, state what each symbol means, where each number comes from, and how the calculation proceeds.
